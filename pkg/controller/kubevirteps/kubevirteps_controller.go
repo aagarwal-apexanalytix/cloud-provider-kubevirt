@@ -697,7 +697,7 @@ func (c *Controller) getDesiredEndpoints(service *v1.Service, tenantSlices []*di
 			terminating := vmi.Status.Phase == kubevirtv1.Failed || vmi.Status.Phase == kubevirtv1.Succeeded
 
 			for _, i := range vmi.Status.Interfaces {
-				if i.Name == "default" {
+				if i.Name == "pod" {
 					desiredEndpoints = append(desiredEndpoints, &discovery.Endpoint{
 						Addresses: []string{i.IP},
 						Conditions: discovery.EndpointConditions{
