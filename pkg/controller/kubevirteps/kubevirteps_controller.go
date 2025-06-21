@@ -460,17 +460,35 @@ func (c *Controller) reconcile(ctx context.Context, r *Request) error {
 	}
 
 	if !serviceDeleted && service.Spec.Type == v1.ServiceTypeLoadBalancer {
-		if len(service.Status.LoadBalancer.Ingress) == 0 {
-			updatedSvc := service.DeepCopy()
-			updatedSvc.Status.LoadBalancer.Ingress = []v1.LoadBalancerIngress{
-				{IP: service.Spec.LoadBalancerIP},
+		updatedSvc := service.DeepCopy()
+
+		// Only patch if Ingress is empty
+		if len(updatedSvc.Status.LoadBalancer.Ingress) == 0 {
+			ingress := v1.LoadBalancerIngress{
+				IP: service.Spec.LoadBalancerIP,
 			}
+
+			// Try to also patch Ports if defined in spec
+			if len(service.Spec.Ports) > 0 {
+				var ingressPorts []v1.PortStatus
+				for _, port := range service.Spec.Ports {
+					ingressPorts = append(ingressPorts, v1.PortStatus{
+						Port:     port.Port,
+						Protocol: port.Protocol,
+						Error:    nil, // You can customize error string if any
+					})
+				}
+				ingress.Ports = ingressPorts
+			}
+
+			updatedSvc.Status.LoadBalancer.Ingress = []v1.LoadBalancerIngress{ingress}
+
 			_, err := c.infraClient.CoreV1().Services(service.Namespace).UpdateStatus(ctx, updatedSvc, metav1.UpdateOptions{})
 			if err != nil {
 				klog.Errorf("Failed to patch status for service %s/%s: %v", service.Namespace, service.Name, err)
 				return err
 			}
-			klog.Infof("Patched status.loadBalancer.ingress for service %s/%s", service.Namespace, service.Name)
+			klog.Infof("Patched status.loadBalancer.ingress (with ports) for service %s/%s", service.Namespace, service.Name)
 		}
 	}
 
