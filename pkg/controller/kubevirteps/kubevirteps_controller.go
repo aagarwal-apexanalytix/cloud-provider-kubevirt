@@ -459,6 +459,21 @@ func (c *Controller) reconcile(ctx context.Context, r *Request) error {
 		klog.Infof("Deleted EndpointSlice %s in namespace %s", eps.Name, eps.Namespace)
 	}
 
+	if !serviceDeleted && service.Spec.Type == v1.ServiceTypeLoadBalancer {
+		if len(service.Status.LoadBalancer.Ingress) == 0 {
+			updatedSvc := service.DeepCopy()
+			updatedSvc.Status.LoadBalancer.Ingress = []v1.LoadBalancerIngress{
+				{IP: service.Spec.LoadBalancerIP},
+			}
+			_, err := c.infraClient.CoreV1().Services(service.Namespace).UpdateStatus(ctx, updatedSvc, metav1.UpdateOptions{})
+			if err != nil {
+				klog.Errorf("Failed to patch status for service %s/%s: %v", service.Namespace, service.Name, err)
+				return err
+			}
+			klog.Infof("Patched status.loadBalancer.ingress for service %s/%s", service.Namespace, service.Name)
+		}
+	}
+
 	return nil
 }
 
