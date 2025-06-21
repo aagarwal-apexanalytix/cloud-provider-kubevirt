@@ -139,7 +139,7 @@ func (i *instancesV2) getNodeAddresses(ifs []kubevirtv1.VirtualMachineInstanceNe
 	// TODO: detect type of all addresses, right now pick only the default
 	for _, i := range ifs {
 		// Only change the IP if it is known, not if it is empty
-		if i.IP != "" {
+		if i.Name == "default" && i.IP != "" {
 			v1helper.AddToNodeAddresses(&addrs, corev1.NodeAddress{
 				Type:    corev1.NodeInternalIP,
 				Address: i.IP,
