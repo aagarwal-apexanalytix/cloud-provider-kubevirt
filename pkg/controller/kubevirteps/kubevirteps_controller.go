@@ -621,30 +621,38 @@ func ownedBy(endpointSlice *discovery.EndpointSlice, svc *v1.Service) bool {
 	return false
 }
 
-func (c *Controller) finalize(service *v1.Service, slicesToCreate []*discovery.EndpointSlice, slicesToUpdate []*discovery.EndpointSlice, slicesToDelete []*discovery.EndpointSlice) error {
-	// If there are slices to delete and slices to create, make them as update
+func (c *Controller) finalize(
+	service *v1.Service,
+	slicesToCreate []*discovery.EndpointSlice,
+	slicesToUpdate []*discovery.EndpointSlice,
+	slicesToDelete []*discovery.EndpointSlice,
+) error {
+	// If there are slices to delete and slices to create, try to reuse names
 	for i := 0; i < len(slicesToDelete); {
 		if len(slicesToCreate) == 0 {
 			break
 		}
-		if slicesToDelete[i].AddressType == slicesToCreate[0].AddressType && ownedBy(slicesToDelete[i], service) {
-			slicesToCreate[0].Name = slicesToDelete[i].Name
+		toDelete := slicesToDelete[i]
+		toCreate := slicesToCreate[0]
+
+		if toDelete.AddressType == toCreate.AddressType && ownedBy(toDelete, service) {
+			toCreate.Name = toDelete.Name
+			slicesToUpdate = append(slicesToUpdate, toCreate)
 			slicesToCreate = slicesToCreate[1:]
-			slicesToUpdate = append(slicesToUpdate, slicesToCreate[0])
 			slicesToDelete = append(slicesToDelete[:i], slicesToDelete[i+1:]...)
 		} else {
 			i++
 		}
 	}
 
-	// Create the new slices if service is not marked for deletion
+	// Create new slices
 	if service.DeletionTimestamp == nil {
 		for _, slice := range slicesToCreate {
 			createdSlice, err := c.infraClient.DiscoveryV1().EndpointSlices(slice.Namespace).Create(context.TODO(), slice, metav1.CreateOptions{})
 			if err != nil {
 				klog.Errorf("Failed to create EndpointSlice %s in namespace %s: %v", slice.Name, slice.Namespace, err)
 				if k8serrors.HasStatusCause(err, v1.NamespaceTerminatingCause) {
-					return nil
+					continue
 				}
 				return err
 			}
