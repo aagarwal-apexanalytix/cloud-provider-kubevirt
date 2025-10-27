@@ -704,8 +704,6 @@ func (c *Controller) getDesiredEndpoints(service *v1.Service, tenantSlices []*di
 	var desiredEndpoints []*discovery.Endpoint
 	if service.Spec.ExternalTrafficPolicy == v1.ServiceExternalTrafficPolicyTypeLocal || service.Spec.Selector == nil {
 		// Extract the desired endpoints from the tenant EndpointSlices
-		// for extracting the nodes it does not matter what type of address we are dealing with
-		// all nodes with an endpoint for a corresponding slice will be selected.
 		nodeSet := sets.Set[string]{}
 		for _, slice := range tenantSlices {
 			for _, endpoint := range slice.Endpoints {
@@ -737,23 +735,39 @@ func (c *Controller) getDesiredEndpoints(service *v1.Service, tenantSlices []*di
 			serving := vmi.Status.Phase == kubevirtv1.Running
 			terminating := vmi.Status.Phase == kubevirtv1.Failed || vmi.Status.Phase == kubevirtv1.Succeeded
 
-			for _, i := range vmi.Status.Interfaces {
-				if i.Name == "pod" {
-					desiredEndpoints = append(desiredEndpoints, &discovery.Endpoint{
-						Addresses: []string{i.IP},
-						Conditions: discovery.EndpointConditions{
-							Ready:       &ready,
-							Serving:     &serving,
-							Terminating: &terminating,
-						},
-						NodeName: &vmi.Status.NodeName,
-					})
-					continue
+			// choose "pod" if present, else "default"
+			var chosen *kubevirtv1.VirtualMachineInstanceNetworkInterface
+			for idx := range vmi.Status.Interfaces {
+				if vmi.Status.Interfaces[idx].Name == "pod" {
+					chosen = &vmi.Status.Interfaces[idx]
+					break
+				}
+				if vmi.Status.Interfaces[idx].Name == "default" && chosen == nil {
+					chosen = &vmi.Status.Interfaces[idx]
 				}
 			}
+			if chosen == nil {
+				continue
+			}
+			ip := chosen.IP
+			if ip == "" && len(chosen.IPs) > 0 {
+				ip = chosen.IPs[0]
+			}
+			if ip == "" {
+				continue
+			}
+
+			desiredEndpoints = append(desiredEndpoints, &discovery.Endpoint{
+				Addresses: []string{ip},
+				Conditions: discovery.EndpointConditions{
+					Ready:       &ready,
+					Serving:     &serving,
+					Terminating: &terminating,
+				},
+				NodeName: &vmi.Status.NodeName,
+			})
 		}
 	}
-
 	return desiredEndpoints
 }
 
