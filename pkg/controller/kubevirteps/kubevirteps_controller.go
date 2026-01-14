@@ -727,8 +727,8 @@ func (c *Controller) getDesiredEndpoints(service *v1.Service, tenantSlices []*di
 
 			err = runtime.DefaultUnstructuredConverter.FromUnstructured(obj.Object, vmi)
 			if err != nil {
-				klog.Errorf("Failed to convert Unstructured to VirtualMachineInstance: %v", err)
-				klog.Fatal(err)
+				klog.Errorf("Failed to convert Unstructured to VirtualMachineInstance %s: %v", node, err)
+				continue
 			}
 
 			ready := vmi.Status.Phase == kubevirtv1.Running
