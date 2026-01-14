@@ -409,7 +409,7 @@ func (c *Controller) reconcile(ctx context.Context, r *Request) error {
 	// 2. The EndpointSlices in the tenant cluster, created for the tenant cluster's Service.
 	// 3. The EndpointSlices in the infra cluster, managed by this controller.
 
-	slicesToDelete := []*discovery.EndpointSlice{}
+	var slicesToDelete []*discovery.EndpointSlice
 	slicesByAddressType := make(map[discovery.AddressType][]*discovery.EndpointSlice)
 
 	serviceSupportedAddressesTypes := getAddressTypesForService(service)
@@ -499,10 +499,10 @@ func (c *Controller) reconcile(ctx context.Context, r *Request) error {
 
 func (c *Controller) reconcileByAddressType(service *v1.Service, tenantSlices []*discovery.EndpointSlice, existingSlices []*discovery.EndpointSlice, addressType discovery.AddressType) error {
 
-	slicesToCreate := []*discovery.EndpointSlice{}
-	slicesToUpdate := []*discovery.EndpointSlice{}
-	slicesToDelete := []*discovery.EndpointSlice{}
-	slicesUntouched := []*discovery.EndpointSlice{}
+	var slicesToCreate []*discovery.EndpointSlice
+	var slicesToUpdate []*discovery.EndpointSlice
+	var slicesToDelete []*discovery.EndpointSlice
+	var slicesUntouched []*discovery.EndpointSlice
 
 	// Create the desired port configuration
 	var desiredPorts []discovery.EndpointPort
