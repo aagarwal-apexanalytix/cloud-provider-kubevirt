@@ -16,13 +16,11 @@ jobs:
       VERSION: ${{github.ref_name}}
       REGISTRY: quay.io/kubevirt
     steps:
-      - uses: actions/checkout@v2
-      - uses: arnested/go-version-action@v1
-        id: go-versions
+      - uses: actions/checkout@v6
       - name: Setup Go
-        uses: actions/setup-go@v2
+        uses: actions/setup-go@v6
         with:
-          go-version: ${{ steps.go-versions.outputs.minimal }}
+          go-version-file: go.mod
       - name: Logging to quay.io
         run: 
           docker login -u ${{ secrets.QUAY_USER }} -p ${{ secrets.QUAY_TOKEN }} quay.io

@@ -4,11 +4,15 @@ reviewers:
   - rmohr
   - davidvossel
   - mfranczy
+  - nunnatsa
+  - orenc1
   - rhrazdil
   - qinqon
 approvers:
   - gonzolino
   - nirarg
+  - nunnatsa
+  - orenc1
   - rmohr
   - davidvossel
   - rhrazdil
