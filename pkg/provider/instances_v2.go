@@ -136,17 +136,22 @@ func (i *instancesV2) getNodeAddresses(ifs []kubevirtv1.VirtualMachineInstanceNe
 	var addrs []corev1.NodeAddress
 
 	foundInternalIP := false
-	// TODO: detect type of all addresses, right now pick only the default
-	for _, i := range ifs {
-		// Only change the IP if it is known, not if it is empty
-		if i.Name == "default" && i.IP != "" {
-			v1helper.AddToNodeAddresses(&addrs, corev1.NodeAddress{
-				Type:    corev1.NodeInternalIP,
-				Address: i.IP,
-			})
-			foundInternalIP = true
-			break
+	// Find the default interface and add all its IP addresses (supports dual-stack)
+	for _, iface := range ifs {
+		if iface.Name != "default" {
+			continue
 		}
+
+		for _, ip := range iface.IPs {
+			if ip != "" {
+				v1helper.AddToNodeAddresses(&addrs, corev1.NodeAddress{
+					Type:    corev1.NodeInternalIP,
+					Address: ip,
+				})
+				foundInternalIP = true
+			}
+		}
+		break
 	}
 
 	// fall back to the previously known internal IP on the node
