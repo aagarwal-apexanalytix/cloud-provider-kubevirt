@@ -359,7 +359,7 @@ func (c *Controller) handleVMIEvent(newObj, oldObj interface{}) {
 	// Check if this is a relevant state change
 	if c.isRelevantVMIChange(vmi, oldVMI) {
 		klog.Infof("VMI %s state changed (phase=%s, node=%s, migrating=%v), triggering reconciliation",
-			vmiName, vmi.Status.Phase, vmi.Status.NodeName, vmi.Status.MigrationState != nil)
+			vmiName, vmi.Status.Phase, vmi.Status.NodeName, c.isVMIMigrating(vmi))
 
 		// Update cache
 		c.updateVMICache(vmiName, vmi)
