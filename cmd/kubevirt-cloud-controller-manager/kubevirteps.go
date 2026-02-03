@@ -29,7 +29,7 @@ func startKubevirtCloudController(
 	ccmConfig *config.CompletedConfig,
 	cloud cloudprovider.Interface) (controller.Interface, bool, error) {
 
-	klog.Infof(fmt.Sprintf("Starting %s.", kubevirteps.ControllerName))
+	klog.Infof("Starting %s.", kubevirteps.ControllerName)
 
 	kubevirtCloud, ok := cloud.(*kubevirt.Cloud)
 	if !ok {
@@ -38,7 +38,7 @@ func startKubevirtCloudController(
 	}
 
 	if kubevirtCloud.GetCloudConfig().LoadBalancer.EnableEPSController == nil || !*kubevirtCloud.GetCloudConfig().LoadBalancer.EnableEPSController {
-		klog.Infof(fmt.Sprintf("%s is not enabled.", kubevirteps.ControllerName))
+		klog.Infof("%s is not enabled.", kubevirteps.ControllerName)
 		return nil, false, nil
 	}
 

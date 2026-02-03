@@ -197,9 +197,10 @@ var _ = Describe("Instances V2", func() {
 							"Type":    Equal(corev1.NodeInternalIP),
 						}),
 					}),
-					"InstanceType": Equal("highPerformance"),
-					"Region":       Equal("region-a"),
-					"Zone":         Equal("zone-1"),
+					"InstanceType":     Equal("highPerformance"),
+					"Region":           Equal("region-a"),
+					"Zone":             Equal("zone-1"),
+					"AdditionalLabels": BeEmpty(),
 				}))
 			})
 
@@ -237,6 +238,7 @@ var _ = Describe("Instances V2", func() {
 						Interfaces: []kubevirtv1.VirtualMachineInstanceNetworkInterface{
 							{
 								IP:   "10.244.0.1",
+								IPs:  []string{"10.244.0.1"},
 								Name: "default",
 							},
 							{
@@ -290,9 +292,94 @@ var _ = Describe("Instances V2", func() {
 							"Type":    Equal(corev1.NodeInternalIP),
 						}),
 					}),
-					"InstanceType": Equal("highPerformance"),
-					"Region":       Equal("region-a"),
-					"Zone":         Equal("zone-1"),
+					"InstanceType":     Equal("highPerformance"),
+					"Region":           Equal("region-a"),
+					"Zone":             Equal("zone-1"),
+					"AdditionalLabels": BeEmpty(),
+				}))
+			})
+
+			It("Should return dual-stack IPs when VMI has both IPv4 and IPv6 addresses", func() {
+				vmiName := "test-vm-dualstack"
+				namespace := "cluster-qwedas"
+				i := instancesV2{
+					namespace: namespace,
+					client:    mockClient,
+					config: &InstancesV2Config{
+						Enabled:              true,
+						ZoneAndRegionEnabled: true,
+					},
+				}
+
+				infraNode := corev1.Node{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "infra-node",
+						Labels: map[string]string{
+							corev1.LabelTopologyRegion: "region-a",
+							corev1.LabelTopologyZone:   "zone-1",
+						},
+					},
+				}
+
+				vmi := kubevirtv1.VirtualMachineInstance{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      vmiName,
+						Namespace: namespace,
+						Annotations: map[string]string{
+							kubevirtv1.InstancetypeAnnotation: "highPerformance",
+						},
+					},
+					Status: kubevirtv1.VirtualMachineInstanceStatus{
+						Interfaces: []kubevirtv1.VirtualMachineInstanceNetworkInterface{
+							{
+								IP:   "10.129.0.209",
+								IPs:  []string{"10.129.0.209", "fd02:0:0:2::13c2"},
+								Name: "default",
+							},
+						},
+						NodeName: infraNode.Name,
+					},
+				}
+
+				tenantNode := corev1.Node{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: vmiName,
+					},
+				}
+
+				gomock.InOrder(
+					mockClient.EXPECT().
+						Get(ctx, types.NamespacedName{Name: vmiName, Namespace: namespace}, gomock.AssignableToTypeOf(&kubevirtv1.VirtualMachineInstance{})).
+						SetArg(2, vmi).
+						Times(1),
+					mockClient.EXPECT().
+						Get(ctx, client.ObjectKey{Name: infraNode.Name}, gomock.AssignableToTypeOf(&corev1.Node{})).
+						SetArg(2, infraNode).
+						Times(1),
+				)
+
+				metadata, err := i.InstanceMetadata(ctx, &tenantNode)
+				Expect(err).To(BeNil())
+
+				idFn := func(index int, element interface{}) string {
+					return strconv.Itoa(index)
+				}
+				Expect(*metadata).To(MatchAllFields(Fields{
+					"ProviderID": Equal("kubevirt://test-vm-dualstack"),
+					"NodeAddresses": MatchAllElementsWithIndex(idFn, Elements{
+						"0": MatchAllFields(Fields{
+							"Address": Equal("10.129.0.209"),
+							"Type":    Equal(corev1.NodeInternalIP),
+						}),
+						"1": MatchAllFields(Fields{
+							"Address": Equal("fd02:0:0:2::13c2"),
+							"Type":    Equal(corev1.NodeInternalIP),
+						}),
+					}),
+					"InstanceType":     Equal("highPerformance"),
+					"Region":           Equal("region-a"),
+					"Zone":             Equal("zone-1"),
+					"AdditionalLabels": BeEmpty(),
 				}))
 			})
 
@@ -329,15 +416,8 @@ var _ = Describe("Instances V2", func() {
 					Status: kubevirtv1.VirtualMachineInstanceStatus{
 						Interfaces: []kubevirtv1.VirtualMachineInstanceNetworkInterface{
 							{
-								IP:   "10.244.0.1",
+								IPs:  []string{"10.244.0.1"},
 								Name: "default",
-							},
-							{
-								IP:   "10.245.0.1",
-								Name: "unknown",
-							},
-							{
-								IP: "10.246.0.1",
 							},
 						},
 						NodeName: infraNode.Name,
@@ -371,9 +451,10 @@ var _ = Describe("Instances V2", func() {
 							"Type":    Equal(corev1.NodeInternalIP),
 						}),
 					}),
-					"InstanceType": Equal("highPerformance"),
-					"Region":       Equal(""),
-					"Zone":         Equal(""),
+					"InstanceType":     Equal("highPerformance"),
+					"Region":           Equal(""),
+					"Zone":             Equal(""),
+					"AdditionalLabels": BeEmpty(),
 				}))
 			})
 
