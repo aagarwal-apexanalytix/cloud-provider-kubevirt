@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -18,7 +19,6 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
-	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/dynamic/dynamicinformer"
@@ -968,18 +968,35 @@ func (c *Controller) getDesiredEndpoints(service *v1.Service, tenantSlices []*di
 	}
 
 	if service.Spec.ExternalTrafficPolicy == v1.ServiceExternalTrafficPolicyTypeLocal || service.Spec.Selector == nil {
-		// Extract the desired endpoints from the tenant EndpointSlices
-		nodeSet := sets.Set[string]{}
+		// Extract the desired endpoints from the tenant EndpointSlices.
+		// Track per-node readiness: a node is considered ready if at least one
+		// tenant endpoint on it is ready. This ensures that when a node reboots
+		// (guest OS restart inside a KubeVirt VM), the infra endpoint is marked
+		// not-ready even though the VMI stays Running.
+		nodeReady := map[string]bool{}
 		for _, slice := range tenantSlices {
 			for _, endpoint := range slice.Endpoints {
-				// find all unique nodes that correspond to an endpoint in a tenant slice
-				nodeSet.Insert(*endpoint.NodeName)
+				if endpoint.NodeName == nil {
+					continue
+				}
+				node := *endpoint.NodeName
+				epReady := endpoint.Conditions.Ready == nil || *endpoint.Conditions.Ready
+				if epReady {
+					nodeReady[node] = true
+				} else if _, exists := nodeReady[node]; !exists {
+					nodeReady[node] = false
+				}
 			}
 		}
 
-		klog.Infof("Desired nodes for service %s in namespace %s: %v", service.Name, service.Namespace, sets.List(nodeSet))
+		nodeNames := make([]string, 0, len(nodeReady))
+		for n := range nodeReady {
+			nodeNames = append(nodeNames, n)
+		}
+		sort.Strings(nodeNames)
+		klog.Infof("Desired nodes for service %s in namespace %s: %v", service.Name, service.Namespace, nodeNames)
 
-		for _, node := range sets.List(nodeSet) {
+		for _, node := range nodeNames {
 			// find vmi for node name
 			obj := &unstructured.Unstructured{}
 			vmi := &kubevirtv1.VirtualMachineInstance{}
@@ -1009,8 +1026,17 @@ func (c *Controller) getDesiredEndpoints(service *v1.Service, tenantSlices []*di
 				klog.Infof("VMI %s is currently migrating, marking endpoint as not ready", vmi.Name)
 			}
 
-			ready := vmi.Status.Phase == kubevirtv1.Running && !isMigrating
-			serving := vmi.Status.Phase == kubevirtv1.Running && !isMigrating
+			// Combine VMI readiness with tenant endpoint readiness.
+			// When a node reboots inside a KubeVirt VM, the VMI stays Running
+			// but the tenant endpoint controller marks pods on that node as not-ready.
+			// We must respect that signal to avoid routing traffic to a dead node.
+			tenantReady := nodeReady[node]
+			if !tenantReady {
+				klog.Infof("Node %s has no ready tenant endpoints, marking infra endpoint as not ready", node)
+			}
+
+			ready := vmi.Status.Phase == kubevirtv1.Running && !isMigrating && tenantReady
+			serving := vmi.Status.Phase == kubevirtv1.Running && !isMigrating && tenantReady
 			terminating := vmi.Status.Phase == kubevirtv1.Failed || vmi.Status.Phase == kubevirtv1.Succeeded
 
 			// choose "pod" if present, else "default"
