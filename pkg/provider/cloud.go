@@ -45,8 +45,21 @@ type CloudConfig struct {
 	Kubeconfig   string             `yaml:"kubeconfig"`
 	LoadBalancer LoadBalancerConfig `yaml:"loadBalancer"`
 	InstancesV2  InstancesV2Config  `yaml:"instancesV2"`
+	NodeTopology NodeTopologyConfig `yaml:"nodeTopology"`
 	Namespace    string             `yaml:"namespace"`
 	InfraLabels  map[string]string  `yaml:"infraLabels"`
+}
+
+// NodeTopologyConfig controls the NodeTopologyController which keeps
+// physical host topology labels on tenant cluster nodes accurate.
+type NodeTopologyConfig struct {
+	// Enabled activates the controller. Default false.
+	Enabled bool `yaml:"enabled"`
+	// InfraClusterName is stamped into node.kubevirt.io/infra-cluster.
+	InfraClusterName string `yaml:"infraClusterName"`
+	// RackLabelKey is the label on infra nodes carrying rack info.
+	// Defaults to "topology.kubernetes.io/rack".
+	RackLabelKey string `yaml:"rackLabelKey"`
 }
 
 type LoadBalancerConfig struct {
