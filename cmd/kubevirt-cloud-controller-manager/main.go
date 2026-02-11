@@ -24,6 +24,7 @@ import (
 	"os"
 
 	"kubevirt.io/cloud-provider-kubevirt/pkg/controller/kubevirteps"
+	"kubevirt.io/cloud-provider-kubevirt/pkg/controller/nodetopology"
 
 	"k8s.io/apimachinery/pkg/util/wait"
 	cloudprovider "k8s.io/cloud-provider"
@@ -51,6 +52,11 @@ func main() {
 	// add kubevirt-cloud-controller to the list of controllers
 	controllerInitializers[kubevirteps.ControllerName.String()] = app.ControllerInitFuncConstructor{
 		Constructor: StartKubevirtCloudControllerWrapper,
+	}
+
+	// add node-topology-controller to the list of controllers
+	controllerInitializers[nodetopology.ControllerName.String()] = app.ControllerInitFuncConstructor{
+		Constructor: StartNodeTopologyControllerWrapper,
 	}
 
 	command := app.NewCloudControllerManagerCommand(ccmOptions, cloudInitializer, controllerInitializers, map[string]string{}, fss, wait.NeverStop)
