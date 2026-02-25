@@ -127,15 +127,19 @@ func cmpLoadBalancerStatuses(a, b *corev1.LoadBalancerStatus) bool {
 }
 
 func generateInfraService(tenantSvc *corev1.Service, ports []corev1.ServicePort) *corev1.Service {
+	labels := map[string]string{}
+	for k, v := range tenantSvc.Labels {
+		labels[k] = v
+	}
+	labels["cluster.x-k8s.io/tenant-service-name"] = tenantSvc.Name
+	labels["cluster.x-k8s.io/tenant-service-namespace"] = tenantSvc.Namespace
+	labels["cluster.x-k8s.io/cluster-name"] = clusterName
+
 	svc := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      lbServiceName,
-			Namespace: lbServiceNamespace,
-			Labels: map[string]string{
-				"cluster.x-k8s.io/tenant-service-name":      tenantSvc.Name,
-				"cluster.x-k8s.io/tenant-service-namespace": tenantSvc.Namespace,
-				"cluster.x-k8s.io/cluster-name":             clusterName,
-			},
+			Name:        lbServiceName,
+			Namespace:   lbServiceNamespace,
+			Labels:      labels,
 			Annotations: tenantSvc.Annotations,
 		},
 		Spec: corev1.ServiceSpec{
