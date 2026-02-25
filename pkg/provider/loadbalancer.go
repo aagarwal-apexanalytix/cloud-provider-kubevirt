@@ -84,15 +84,22 @@ func (lb *loadbalancer) EnsureLoadBalancer(ctx context.Context, clusterName stri
 		TenantClusterNameLabelKey: clusterName,
 	}
 
-	lbLabels := map[string]string{
-		TenantServiceNameLabelKey:      service.Name,
-		TenantServiceNamespaceLabelKey: service.Namespace,
-		TenantClusterNameLabelKey:      clusterName,
+	lbLabels := map[string]string{}
+
+	// Copy tenant service labels first so they can be overridden by infra/identity labels
+	for key, val := range service.Labels {
+		lbLabels[key] = val
 	}
 
+	// Infrastructure-wide labels (override tenant labels if conflicting)
 	for key, val := range lb.infraLabels {
 		lbLabels[key] = val
 	}
+
+	// Identity labels always take precedence
+	lbLabels[TenantServiceNameLabelKey] = service.Name
+	lbLabels[TenantServiceNamespaceLabelKey] = service.Namespace
+	lbLabels[TenantClusterNameLabelKey] = clusterName
 
 	lbService, err = lb.createLoadBalancerService(ctx, lbName, service, vmiLabels, lbLabels, ports)
 	if err != nil {
