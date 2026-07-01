@@ -37,6 +37,13 @@ func startKubevirtCloudController(
 		return nil, false, err
 	}
 
+	// AllocationOnly mode does not advertise mirror Services from the infra cluster, so their
+	// EndpointSlices must not be populated — disable the EPS controller regardless of EnableEPSController.
+	if ao := kubevirtCloud.GetCloudConfig().LoadBalancer.AllocationOnly; ao != nil && *ao {
+		klog.Infof("%s is disabled: loadBalancer.allocationOnly is set (tenant advertises its own LoadBalancer IPs).", kubevirteps.ControllerName)
+		return nil, false, nil
+	}
+
 	if kubevirtCloud.GetCloudConfig().LoadBalancer.EnableEPSController == nil || !*kubevirtCloud.GetCloudConfig().LoadBalancer.EnableEPSController {
 		klog.Infof("%s is not enabled.", kubevirteps.ControllerName)
 		return nil, false, nil
