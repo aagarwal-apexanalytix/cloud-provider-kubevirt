@@ -80,6 +80,16 @@ type LoadBalancerConfig struct {
 	// This is a temporary flag to enable/disable the EPS controller
 	// When disabled the service selector is used.
 	EnableEPSController *bool `yaml:"enableEPSController,omitempty"`
+
+	// AllocationOnly puts the CCM into "allocate but do not advertise" mode for this tenant.
+	// The infra (mirror) Service is still created so infra LB-IPAM assigns an address that is
+	// written back to the tenant Service, but the mirror is forced to
+	// externalTrafficPolicy=Local and left selectorless with NO EndpointSlices (the EPS
+	// controller is disabled) — so the infra CNI (e.g. Cilium BGP) withdraws the route.
+	// Use when the TENANT cluster advertises its own LoadBalancer IPs (e.g. single-NIC
+	// routable tenants running their own Cilium BGP), to avoid a competing infra BGP path.
+	// Independent of the tenant Service's externalTrafficPolicy; applies to all LB Services.
+	AllocationOnly *bool `yaml:"allocationOnly,omitempty"`
 }
 
 type InstancesV2Config struct {

@@ -76,7 +76,15 @@ func (lb *loadbalancer) EnsureLoadBalancer(ctx context.Context, clusterName stri
 	ports := lb.createLoadBalancerServicePorts(service)
 	// LoadBalancer already exist, update the ports if changed
 	if lbService != nil {
-		return &lbService.Status.LoadBalancer, lb.updateLoadBalancerServicePorts(ctx, lbService, ports)
+		if err := lb.updateLoadBalancerServicePorts(ctx, lbService, ports); err != nil {
+			return nil, err
+		}
+		// Reconcile allocation-only posture in place (no delete → the allocated IP is preserved)
+		// so a mirror created before AllocationOnly was set converges to etp=Local + selectorless.
+		if err := lb.ensureAllocationOnlyPosture(ctx, lbService); err != nil {
+			return &lbService.Status.LoadBalancer, err
+		}
+		return &lbService.Status.LoadBalancer, nil
 	}
 
 	vmiLabels := map[string]string{
@@ -163,6 +171,34 @@ func (lb *loadbalancer) updateLoadBalancerServicePorts(ctx context.Context, lbSe
 	return nil
 }
 
+// ensureAllocationOnlyPosture reconciles an existing mirror Service into the allocation-only
+// posture (externalTrafficPolicy=Local + no selector) in place, so a mirror created before
+// AllocationOnly was enabled converges without a delete (the allocated IP is preserved). A no-op
+// unless AllocationOnly is set. With the EPS controller disabled in this mode, the Service ends up
+// with no EndpointSlices, so the infra CNI (Cilium BGP, etp=Local) withdraws the route.
+func (lb *loadbalancer) ensureAllocationOnlyPosture(ctx context.Context, lbService *corev1.Service) error {
+	if lb.config.AllocationOnly == nil || !*lb.config.AllocationOnly {
+		return nil
+	}
+	changed := false
+	if lbService.Spec.ExternalTrafficPolicy != corev1.ServiceExternalTrafficPolicyTypeLocal {
+		lbService.Spec.ExternalTrafficPolicy = corev1.ServiceExternalTrafficPolicyTypeLocal
+		changed = true
+	}
+	if lbService.Spec.Selector != nil {
+		lbService.Spec.Selector = nil
+		changed = true
+	}
+	if !changed {
+		return nil
+	}
+	if err := lb.client.Update(ctx, lbService); err != nil {
+		klog.Errorf("Failed to reconcile allocation-only posture for LoadBalancer service %s: %v", lbService.Name, err)
+		return err
+	}
+	return nil
+}
+
 // EnsureLoadBalancerDeleted deletes the specified load balancer if it
 // exists, returning nil if the load balancer specified either didn't exist or
 // was successfully deleted.
@@ -214,8 +250,15 @@ func (lb *loadbalancer) createLoadBalancerService(ctx context.Context, lbName st
 			ExternalTrafficPolicy: service.Spec.ExternalTrafficPolicy,
 		},
 	}
-	// Give controller privilege above selectorless
-	if lb.config.EnableEPSController != nil && *lb.config.EnableEPSController && service.Spec.ExternalTrafficPolicy == corev1.ServiceExternalTrafficPolicyTypeLocal {
+	// AllocationOnly takes precedence: allocate the infra LB IP but do not advertise it (the
+	// tenant advertises its own). Force externalTrafficPolicy=Local and leave the Service
+	// selectorless (no EndpointSlices, since the EPS controller is disabled in this mode) so the
+	// infra CNI withdraws the route regardless of the tenant Service's externalTrafficPolicy.
+	if lb.config.AllocationOnly != nil && *lb.config.AllocationOnly {
+		lbService.Spec.ExternalTrafficPolicy = corev1.ServiceExternalTrafficPolicyTypeLocal
+		lbService.Spec.Selector = nil
+	} else if lb.config.EnableEPSController != nil && *lb.config.EnableEPSController && service.Spec.ExternalTrafficPolicy == corev1.ServiceExternalTrafficPolicyTypeLocal {
+		// Give controller privilege above selectorless
 		lbService.Spec.Selector = nil
 	} else if lb.config.Selectorless != nil && *lb.config.Selectorless {
 		lbService.Spec.Selector = nil

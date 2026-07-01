@@ -335,6 +335,57 @@ var _ = Describe("LoadBalancer", func() {
 			Expect(lbStatus.Ingress[0].IP).Should(Equal(loadBalancerIP))
 		})
 
+		It("Should create an allocation-only loadbalancer (etp forced Local, no selector) regardless of tenant policy", func() {
+			checkSvcExistErr := notFoundErr
+			getCount := 3
+
+			// Tenant policy is Cluster; AllocationOnly must still force the mirror to Local + selectorless.
+			tenantService.Spec.ExternalTrafficPolicy = corev1.ServiceExternalTrafficPolicyTypeCluster
+			lb.config.AllocationOnly = pointer.Bool(true)
+
+			c.EXPECT().
+				Get(ctx, client.ObjectKey{Name: "af6ebf1722bb111e9b210d663bd873d9", Namespace: "test"}, gomock.AssignableToTypeOf(&corev1.Service{})).
+				Return(checkSvcExistErr)
+
+			infraService1 := generateInfraService(
+				tenantService,
+				[]corev1.ServicePort{
+					{Name: "port1", Protocol: corev1.ProtocolTCP, Port: 80, TargetPort: intstr.IntOrString{Type: intstr.Int, IntVal: 30001}},
+				},
+			)
+			infraService1.Spec.ExternalTrafficPolicy = corev1.ServiceExternalTrafficPolicyTypeLocal
+			infraService1.Spec.Selector = nil
+
+			c.EXPECT().Create(ctx, infraService1)
+
+			for i := 0; i < getCount; i++ {
+				infraService2 := infraService1.DeepCopy()
+				if i == getCount-1 {
+					infraService2.Status = corev1.ServiceStatus{
+						LoadBalancer: corev1.LoadBalancerStatus{
+							Ingress: []corev1.LoadBalancerIngress{
+								{
+									IP: loadBalancerIP,
+								},
+							},
+						},
+					}
+				}
+				c.EXPECT().Get(
+					ctx,
+					client.ObjectKey{Name: "af6ebf1722bb111e9b210d663bd873d9", Namespace: "test"},
+					gomock.AssignableToTypeOf(&corev1.Service{}),
+				).Do(func(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) {
+					infraService2.DeepCopyInto(obj.(*corev1.Service))
+				})
+			}
+
+			lbStatus, err := lb.EnsureLoadBalancer(ctx, clusterName, tenantService, nodes)
+			Expect(err).To(BeNil())
+			Expect(len(lbStatus.Ingress)).Should(Equal(1))
+			Expect(lbStatus.Ingress[0].IP).Should(Equal(loadBalancerIP))
+		})
+
 		It("Should create new Service and poll LoadBalancer service 1 time", func() {
 			checkSvcExistErr := notFoundErr
 			getCount := 1
