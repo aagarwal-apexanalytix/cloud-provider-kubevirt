@@ -90,6 +90,18 @@ type LoadBalancerConfig struct {
 	// routable tenants running their own Cilium BGP), to avoid a competing infra BGP path.
 	// Independent of the tenant Service's externalTrafficPolicy; applies to all LB Services.
 	AllocationOnly *bool `yaml:"allocationOnly,omitempty"`
+
+	// AllocationOnlyLBClass, when non-empty AND AllocationOnly is set, is written to the mirror
+	// Service's spec.loadBalancerClass. A class that no infra LB provider serves (e.g.
+	// "io.kubevirt/allocation-only") makes Cilium/MetalLB/Kube-VIP ignore the mirror entirely:
+	// the infra CNI programs NO local datapath for the IP (so infra-cluster pods route it out to
+	// the fabric and reach the tenant's own BGP-advertised edge, instead of self-hijacking it) and
+	// reserves NO address for it. Because infra no longer allocates, the tenant Service MUST set
+	// spec.loadBalancerIP in this mode — the tenant owns allocation + BGP advertisement; the CCM
+	// copies that IP to the mirror and publishes it on the mirror status without waiting for infra
+	// allocation. Empty (default) keeps the legacy allocation-only behavior, where infra allocates
+	// and reserves the IP but withdraws the route (etp=Local + no EndpointSlices). Provider-agnostic.
+	AllocationOnlyLBClass *string `yaml:"allocationOnlyLBClass,omitempty"`
 }
 
 type InstancesV2Config struct {
