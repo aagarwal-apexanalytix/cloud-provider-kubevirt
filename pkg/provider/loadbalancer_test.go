@@ -386,6 +386,214 @@ var _ = Describe("LoadBalancer", func() {
 			Expect(lbStatus.Ingress[0].IP).Should(Equal(loadBalancerIP))
 		})
 
+		It("Should create an allocation-only + LB-class mirror (sentinel class, no poll) and report the tenant IP", func() {
+			const tenantIP = "203.0.113.10"
+			const sentinel = "io.kubevirt/allocation-only"
+			tenantService.Spec.ExternalTrafficPolicy = corev1.ServiceExternalTrafficPolicyTypeLocal
+			tenantService.Spec.LoadBalancerIP = tenantIP
+			lb.config.AllocationOnly = pointer.Bool(true)
+			lb.config.AllocationOnlyLBClass = pointer.String(sentinel)
+
+			c.EXPECT().
+				Get(ctx, client.ObjectKey{Name: "af6ebf1722bb111e9b210d663bd873d9", Namespace: "test"}, gomock.AssignableToTypeOf(&corev1.Service{})).
+				Return(notFoundErr)
+
+			infra := generateInfraService(
+				tenantService,
+				[]corev1.ServicePort{
+					{Name: "port1", Protocol: corev1.ProtocolTCP, Port: 80, TargetPort: intstr.IntOrString{Type: intstr.Int, IntVal: 30001}},
+				},
+			)
+			infra.Spec.ExternalTrafficPolicy = corev1.ServiceExternalTrafficPolicyTypeLocal
+			infra.Spec.Selector = nil
+			sentinelCls := sentinel
+			infra.Spec.LoadBalancerClass = &sentinelCls
+			infra.Spec.LoadBalancerIP = tenantIP
+
+			// exactly one Create and NO poll Get — status is derived from the tenant IP.
+			c.EXPECT().Create(ctx, infra)
+
+			lbStatus, err := lb.EnsureLoadBalancer(ctx, clusterName, tenantService, nodes)
+			Expect(err).To(BeNil())
+			Expect(len(lbStatus.Ingress)).Should(Equal(1))
+			Expect(lbStatus.Ingress[0].IP).Should(Equal(tenantIP))
+		})
+
+		It("Should fall back to legacy allocation-only (NO LB-class on the mirror) when the class is configured but the Service has no spec.loadBalancerIP", func() {
+			// An infra-allocated Service (e.g. an internal mesh Service) has no tenant IP; enabling the
+			// class fleet-wide must NOT stamp it with the class or error it — it stays on the legacy
+			// allocate-and-poll path so infra-allocated LoadBalancers are never disturbed.
+			const infraIP = "198.51.100.29" // RFC5737 stand-in for an infra-pool address
+			tenantService.Spec.ExternalTrafficPolicy = corev1.ServiceExternalTrafficPolicyTypeCluster
+			tenantService.Spec.LoadBalancerIP = "" // relies on infra allocation
+			lb.config.AllocationOnly = pointer.Bool(true)
+			lb.config.AllocationOnlyLBClass = pointer.String("io.kubevirt/allocation-only")
+
+			c.EXPECT().
+				Get(ctx, client.ObjectKey{Name: "af6ebf1722bb111e9b210d663bd873d9", Namespace: "test"}, gomock.AssignableToTypeOf(&corev1.Service{})).
+				Return(notFoundErr)
+
+			infra := generateInfraService(
+				tenantService,
+				[]corev1.ServicePort{
+					{Name: "port1", Protocol: corev1.ProtocolTCP, Port: 80, TargetPort: intstr.IntOrString{Type: intstr.Int, IntVal: 30001}},
+				},
+			)
+			infra.Spec.ExternalTrafficPolicy = corev1.ServiceExternalTrafficPolicyTypeLocal
+			infra.Spec.Selector = nil
+			// KEY assertion: the created mirror has NO LoadBalancerClass and NO LoadBalancerIP — gomock
+			// DeepEqual would fail if the code stamped the class on a no-tenant-IP Service.
+			c.EXPECT().Create(ctx, infra)
+
+			// legacy path: poll until infra populates the mirror status.
+			infra2 := infra.DeepCopy()
+			infra2.Status = corev1.ServiceStatus{
+				LoadBalancer: corev1.LoadBalancerStatus{Ingress: []corev1.LoadBalancerIngress{{IP: infraIP}}},
+			}
+			c.EXPECT().
+				Get(ctx, client.ObjectKey{Name: "af6ebf1722bb111e9b210d663bd873d9", Namespace: "test"}, gomock.AssignableToTypeOf(&corev1.Service{})).
+				Do(func(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) {
+					infra2.DeepCopyInto(obj.(*corev1.Service))
+				})
+
+			lbStatus, err := lb.EnsureLoadBalancer(ctx, clusterName, tenantService, nodes)
+			Expect(err).To(BeNil())
+			Expect(len(lbStatus.Ingress)).Should(Equal(1))
+			Expect(lbStatus.Ingress[0].IP).Should(Equal(infraIP))
+		})
+
+		It("Should delete a pre-existing mirror that lacks the LB-class and report the tenant IP (recreate next reconcile)", func() {
+			const tenantIP = "203.0.113.10"
+			const sentinel = "io.kubevirt/allocation-only"
+			tenantService.Spec.LoadBalancerIP = tenantIP
+			lb.config.AllocationOnly = pointer.Bool(true)
+			lb.config.AllocationOnlyLBClass = pointer.String(sentinel)
+
+			existing := generateInfraService(
+				tenantService,
+				[]corev1.ServicePort{
+					{Name: "port1", Protocol: corev1.ProtocolTCP, Port: 80, TargetPort: intstr.IntOrString{Type: intstr.Int, IntVal: 30001}},
+				},
+			)
+			existing.Spec.ExternalTrafficPolicy = corev1.ServiceExternalTrafficPolicyTypeLocal
+			existing.Spec.Selector = nil
+			// no LoadBalancerClass on the existing mirror → migration must delete it.
+
+			c.EXPECT().
+				Get(ctx, client.ObjectKey{Name: "af6ebf1722bb111e9b210d663bd873d9", Namespace: "test"}, gomock.AssignableToTypeOf(&corev1.Service{})).
+				Do(func(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) {
+					existing.DeepCopyInto(obj.(*corev1.Service))
+				})
+			c.EXPECT().Delete(ctx, gomock.AssignableToTypeOf(&corev1.Service{}))
+
+			lbStatus, err := lb.EnsureLoadBalancer(ctx, clusterName, tenantService, nodes)
+			Expect(err).To(BeNil())
+			Expect(len(lbStatus.Ingress)).Should(Equal(1))
+			Expect(lbStatus.Ingress[0].IP).Should(Equal(tenantIP))
+		})
+
+		It("GetLoadBalancer reports the tenant IP in LB-class mode (agrees with EnsureLoadBalancer, no reconcile loop)", func() {
+			const tenantIP = "203.0.113.10"
+			const sentinel = "io.kubevirt/allocation-only"
+			tenantService.Spec.LoadBalancerIP = tenantIP
+			lb.config.AllocationOnly = pointer.Bool(true)
+			lb.config.AllocationOnlyLBClass = pointer.String(sentinel)
+
+			existing := generateInfraService(
+				tenantService,
+				[]corev1.ServicePort{
+					{Name: "port1", Protocol: corev1.ProtocolTCP, Port: 80, TargetPort: intstr.IntOrString{Type: intstr.Int, IntVal: 30001}},
+				},
+			)
+			// mirror exists but its own status is empty (infra never populated it).
+			c.EXPECT().
+				Get(ctx, client.ObjectKey{Name: "af6ebf1722bb111e9b210d663bd873d9", Namespace: "test"}, gomock.AssignableToTypeOf(&corev1.Service{})).
+				Do(func(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) {
+					existing.DeepCopyInto(obj.(*corev1.Service))
+				})
+
+			status, exists, err := lb.GetLoadBalancer(ctx, clusterName, tenantService)
+			Expect(err).To(BeNil())
+			Expect(exists).To(BeTrue())
+			Expect(len(status.Ingress)).Should(Equal(1))
+			Expect(status.Ingress[0].IP).Should(Equal(tenantIP))
+		})
+
+		It("UpdateLoadBalancer is a no-op in LB-class mode (no client calls)", func() {
+			lb.config.AllocationOnly = pointer.Bool(true)
+			lb.config.AllocationOnlyLBClass = pointer.String("io.kubevirt/allocation-only")
+			tenantService.Spec.LoadBalancerIP = "203.0.113.10"
+			// no c.EXPECT() → any Get/Update would fail the mock.
+			Expect(lb.UpdateLoadBalancer(ctx, clusterName, tenantService, nodes)).To(BeNil())
+		})
+
+		It("Should reconcile a matching sentinel-class mirror in place (no delete/recreate) and report the tenant IP", func() {
+			const tenantIP = "203.0.113.10"
+			const sentinel = "io.kubevirt/allocation-only"
+			tenantService.Spec.ExternalTrafficPolicy = corev1.ServiceExternalTrafficPolicyTypeLocal
+			tenantService.Spec.LoadBalancerIP = tenantIP
+			lb.config.AllocationOnly = pointer.Bool(true)
+			lb.config.AllocationOnlyLBClass = pointer.String(sentinel)
+
+			// steady state: the mirror already carries the sentinel class + Local/selectorless posture
+			// + matching ports, so nothing is updated, deleted, or recreated.
+			existing := generateInfraService(
+				tenantService,
+				[]corev1.ServicePort{
+					{Name: "port1", Protocol: corev1.ProtocolTCP, Port: 80, TargetPort: intstr.IntOrString{Type: intstr.Int, IntVal: 30001}},
+				},
+			)
+			existing.Spec.ExternalTrafficPolicy = corev1.ServiceExternalTrafficPolicyTypeLocal
+			existing.Spec.Selector = nil
+			sentinelCls := sentinel
+			existing.Spec.LoadBalancerClass = &sentinelCls
+			existing.Spec.LoadBalancerIP = tenantIP
+
+			// ONLY a Get — no Delete, no Create, no Update (ports + posture already correct).
+			c.EXPECT().
+				Get(ctx, client.ObjectKey{Name: "af6ebf1722bb111e9b210d663bd873d9", Namespace: "test"}, gomock.AssignableToTypeOf(&corev1.Service{})).
+				Do(func(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) {
+					existing.DeepCopyInto(obj.(*corev1.Service))
+				})
+
+			lbStatus, err := lb.EnsureLoadBalancer(ctx, clusterName, tenantService, nodes)
+			Expect(err).To(BeNil())
+			Expect(len(lbStatus.Ingress)).Should(Equal(1))
+			Expect(lbStatus.Ingress[0].IP).Should(Equal(tenantIP))
+		})
+
+		It("Should delete a sentinel-class mirror and report a pending (empty) status when the tenant removes spec.loadBalancerIP (downgrade to legacy)", func() {
+			const sentinel = "io.kubevirt/allocation-only"
+			tenantService.Spec.LoadBalancerIP = "" // tenant removed its designated IP → downgrade to legacy
+			lb.config.AllocationOnly = pointer.Bool(true)
+			lb.config.AllocationOnlyLBClass = pointer.String(sentinel)
+
+			// the mirror still carries the immutable sentinel class from when it was a class Service
+			existing := generateInfraService(
+				tenantService,
+				[]corev1.ServicePort{
+					{Name: "port1", Protocol: corev1.ProtocolTCP, Port: 80, TargetPort: intstr.IntOrString{Type: intstr.Int, IntVal: 30001}},
+				},
+			)
+			existing.Spec.ExternalTrafficPolicy = corev1.ServiceExternalTrafficPolicyTypeLocal
+			existing.Spec.Selector = nil
+			sentinelCls := sentinel
+			existing.Spec.LoadBalancerClass = &sentinelCls
+
+			c.EXPECT().
+				Get(ctx, client.ObjectKey{Name: "af6ebf1722bb111e9b210d663bd873d9", Namespace: "test"}, gomock.AssignableToTypeOf(&corev1.Service{})).
+				Do(func(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) {
+					existing.DeepCopyInto(obj.(*corev1.Service))
+				})
+			c.EXPECT().Delete(ctx, gomock.AssignableToTypeOf(&corev1.Service{}))
+
+			// no tenant IP anymore → pending (empty) status; the recreated legacy mirror allocates next reconcile.
+			lbStatus, err := lb.EnsureLoadBalancer(ctx, clusterName, tenantService, nodes)
+			Expect(err).To(BeNil())
+			Expect(lbStatus).NotTo(BeNil())
+			Expect(lbStatus.Ingress).To(BeEmpty())
+		})
+
 		It("Should create new Service and poll LoadBalancer service 1 time", func() {
 			checkSvcExistErr := notFoundErr
 			getCount := 1
