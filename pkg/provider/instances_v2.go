@@ -133,6 +133,16 @@ func (i *instancesV2) findInstance(ctx context.Context, fetchers ...InstanceGett
 }
 
 func (i *instancesV2) getNodeAddresses(ifs []kubevirtv1.VirtualMachineInstanceNetworkInterface, prevAddrs []corev1.NodeAddress) []corev1.NodeAddress {
+	return NodeAddressesFromVMIInterfaces(ifs, prevAddrs)
+}
+
+// NodeAddressesFromVMIInterfaces derives a node's addresses from a VMI's status.interfaces, using the SAME
+// rule the cloud-node-controller consumes: the InternalIP comes from the interface named "default" (falling
+// back to the previously-known InternalIP when the default interface reports none). Exported so the
+// event-driven node-ip-sync controller (pkg/controller/nodeipsync) reuses the EXACT derivation instead of
+// duplicating it — both the periodic cloud-node-controller path (InstanceMetadata) and the fast event path
+// then compute identical addresses and converge.
+func NodeAddressesFromVMIInterfaces(ifs []kubevirtv1.VirtualMachineInstanceNetworkInterface, prevAddrs []corev1.NodeAddress) []corev1.NodeAddress {
 	var addrs []corev1.NodeAddress
 
 	foundInternalIP := false
