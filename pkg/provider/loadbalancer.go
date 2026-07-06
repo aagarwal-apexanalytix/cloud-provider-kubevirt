@@ -2,7 +2,6 @@ package provider
 
 import (
 	"context"
-	"net"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -51,15 +50,6 @@ func (lb *loadbalancer) GetLoadBalancer(ctx context.Context, clusterName string,
 		return nil, false, nil
 	}
 
-	// In allocation-only + LB-class mode the mirror status is never populated by infra; report the
-	// tenant-owned IP so Get and Ensure agree (otherwise KCM would reconcile in a loop). This is
-	// intentionally derived from the tenant Service spec (the designated IP), NOT from the mirror's
-	// current class — during an adopt migration the mirror may still be legacy-classed, but Get and
-	// Ensure both key off the same spec, so they never diverge.
-	if s := lb.allocationOnlyStatus(service); s != nil {
-		return s, true, nil
-	}
-
 	status = &lbService.Status.LoadBalancer
 	return status, true, nil
 }
@@ -84,37 +74,8 @@ func (lb *loadbalancer) EnsureLoadBalancer(ctx context.Context, clusterName stri
 	}
 
 	ports := lb.createLoadBalancerServicePorts(service)
-	// cls is the sentinel LoadBalancerClass for THIS Service, or "" to keep legacy behavior. It is a
-	// per-service decision (see lbClassForService): set only when the feature is configured AND the
-	// tenant designated a valid spec.loadBalancerIP, so enabling the feature fleet-wide leaves
-	// infra-allocated LB Services (no tenant IP) untouched on the legacy path.
-	cls := lb.lbClassForService(service)
-
-	// LoadBalancer already exists.
+	// LoadBalancer already exist, update the ports if changed
 	if lbService != nil {
-		// spec.loadBalancerClass is immutable: if the desired class for this Service differs from the
-		// existing mirror's — adopting the sentinel, or dropping it if the tenant IP was removed — the
-		// mirror must be recreated. Delete it and return the current status; the next reconcile
-		// recreates it (avoids a same-call delete/create finalizer race). Equal classes (the common
-		// case, incl. legacy "" == "") skip this and reconcile in place.
-		if lbClassOf(lbService) != cls {
-			klog.Infof("Deleting mirror %s to change loadBalancerClass to %q (recreated on the next reconcile)", lbService.Name, cls)
-			if err := lb.client.Delete(ctx, lbService); err != nil {
-				klog.Errorf("Failed to delete mirror %s for loadBalancerClass migration: %v", lbService.Name, err)
-				return nil, err
-			}
-			if cls != "" {
-				// Adopting the class: the tenant owns the IP and already advertises it via its own
-				// BGP, so report it now; the next reconcile recreates the sentinel mirror.
-				return lb.allocationOnlyStatus(service), nil
-			}
-			// Dropping the class (the tenant removed its spec.loadBalancerIP): the recreated legacy
-			// mirror gets a fresh infra-allocated IP on the next reconcile. Report a pending (empty)
-			// status until then — a sentinel mirror's own status is never infra-populated, so there is
-			// no prior IP to hold, and the tenant's old IP is being withdrawn anyway.
-			return &corev1.LoadBalancerStatus{}, nil
-		}
-		// update the ports if changed
 		if err := lb.updateLoadBalancerServicePorts(ctx, lbService, ports); err != nil {
 			return nil, err
 		}
@@ -122,10 +83,6 @@ func (lb *loadbalancer) EnsureLoadBalancer(ctx context.Context, clusterName stri
 		// so a mirror created before AllocationOnly was set converges to etp=Local + selectorless.
 		if err := lb.ensureAllocationOnlyPosture(ctx, lbService); err != nil {
 			return &lbService.Status.LoadBalancer, err
-		}
-		// A sentinel-class mirror is ignored by infra (never gets a status); report the tenant IP.
-		if cls != "" {
-			return lb.allocationOnlyStatus(service), nil
 		}
 		return &lbService.Status.LoadBalancer, nil
 	}
@@ -158,12 +115,6 @@ func (lb *loadbalancer) EnsureLoadBalancer(ctx context.Context, clusterName stri
 		return nil, err
 	}
 
-	// A sentinel-class mirror is ignored by infra, so it never populates a status and the poll below
-	// would time out; the tenant owns the address, so report it directly.
-	if cls != "" {
-		return lb.allocationOnlyStatus(service), nil
-	}
-
 	err = wait.PollWithContext(ctx, lb.getLoadBalancerCreatePollInterval(), lb.getLoadBalancerCreatePollTimeout(), func(ctx context.Context) (bool, error) {
 		if len(lbService.Status.LoadBalancer.Ingress) != 0 {
 			return true, nil
@@ -193,14 +144,6 @@ func (lb *loadbalancer) EnsureLoadBalancer(ctx context.Context, clusterName stri
 // parameters as read-only and not modify them.
 // Parameter 'clusterName' is the name of the cluster as presented to kube-controller-manager
 func (lb *loadbalancer) UpdateLoadBalancer(ctx context.Context, clusterName string, service *corev1.Service, nodes []*corev1.Node) error {
-	// For a sentinel-class Service the mirror carries no traffic (no infra provider serves it), so
-	// port reconciliation is a no-op; skipping it also avoids racing a concurrent EnsureLoadBalancer
-	// class migration (a Get returning the terminating mirror → Update conflict). EnsureLoadBalancer
-	// owns the class, posture, and status in this mode.
-	if lb.lbClassForService(service) != "" {
-		return nil
-	}
-
 	lbName := lb.GetLoadBalancerName(ctx, clusterName, service)
 	var lbService corev1.Service
 	if err := lb.client.Get(ctx, client.ObjectKey{Name: lbName, Namespace: lb.namespace}, &lbService); err != nil {
@@ -254,59 +197,6 @@ func (lb *loadbalancer) ensureAllocationOnlyPosture(ctx context.Context, lbServi
 		return err
 	}
 	return nil
-}
-
-// allocationOnlyLBClass returns the configured sentinel LoadBalancerClass, but only when the CCM
-// is in allocation-only mode AND a non-empty class is set. Otherwise it returns "" (the legacy
-// allocation-only behavior, or non-allocation-only modes, are unaffected).
-func (lb *loadbalancer) allocationOnlyLBClass() string {
-	if lb.config.AllocationOnly == nil || !*lb.config.AllocationOnly {
-		return ""
-	}
-	if lb.config.AllocationOnlyLBClass == nil {
-		return ""
-	}
-	return *lb.config.AllocationOnlyLBClass
-}
-
-// lbClassForService returns the sentinel LoadBalancerClass to stamp on the mirror for THIS Service,
-// or "" to keep legacy behavior. It is a PER-SERVICE decision: the class is applied only when the
-// feature is configured AND the tenant designated a valid spec.loadBalancerIP. Services that rely on
-// infra allocation (no tenant IP — e.g. internal mesh Services that get an infra-pool address) keep
-// legacy allocation-only, so enabling the feature fleet-wide never disturbs them.
-func (lb *loadbalancer) lbClassForService(service *corev1.Service) string {
-	cls := lb.allocationOnlyLBClass()
-	if cls == "" {
-		return ""
-	}
-	if net.ParseIP(service.Spec.LoadBalancerIP) == nil {
-		return ""
-	}
-	return cls
-}
-
-// lbClassOf returns the Service's spec.loadBalancerClass, or "" if unset.
-func lbClassOf(svc *corev1.Service) string {
-	if svc.Spec.LoadBalancerClass == nil {
-		return ""
-	}
-	return *svc.Spec.LoadBalancerClass
-}
-
-// allocationOnlyStatus builds the LoadBalancer status for allocation-only + LB-class mode directly
-// from the tenant Service's own spec.loadBalancerIP. In that mode no infra provider owns the mirror
-// or populates its status, so the CCM reports the tenant-owned IP without reading/writing the
-// mirror status (avoiding a services/status write). Returns nil when not in LB-class mode or when
-// the tenant has not designated an IP, so callers fall back to the legacy path.
-func (lb *loadbalancer) allocationOnlyStatus(service *corev1.Service) *corev1.LoadBalancerStatus {
-	// lbClassForService is non-empty only when the tenant designated a valid spec.loadBalancerIP, so
-	// this both gates the mode and guarantees a valid IP to echo into the status.
-	if lb.lbClassForService(service) == "" {
-		return nil
-	}
-	return &corev1.LoadBalancerStatus{
-		Ingress: []corev1.LoadBalancerIngress{{IP: service.Spec.LoadBalancerIP}},
-	}
 }
 
 // EnsureLoadBalancerDeleted deletes the specified load balancer if it
@@ -367,13 +257,6 @@ func (lb *loadbalancer) createLoadBalancerService(ctx context.Context, lbName st
 	if lb.config.AllocationOnly != nil && *lb.config.AllocationOnly {
 		lbService.Spec.ExternalTrafficPolicy = corev1.ServiceExternalTrafficPolicyTypeLocal
 		lbService.Spec.Selector = nil
-		// With a sentinel LoadBalancerClass (set per-service when the tenant designated an IP), no
-		// infra LB provider programs a local datapath or reserves the IP for this mirror — the tenant
-		// owns both. The address is taken from the tenant Service's spec.loadBalancerIP (copied
-		// below); infra will not allocate.
-		if cls := lb.lbClassForService(service); cls != "" {
-			lbService.Spec.LoadBalancerClass = &cls
-		}
 	} else if lb.config.EnableEPSController != nil && *lb.config.EnableEPSController && service.Spec.ExternalTrafficPolicy == corev1.ServiceExternalTrafficPolicyTypeLocal {
 		// Give controller privilege above selectorless
 		lbService.Spec.Selector = nil

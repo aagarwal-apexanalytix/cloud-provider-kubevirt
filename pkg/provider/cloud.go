@@ -90,27 +90,6 @@ type LoadBalancerConfig struct {
 	// routable tenants running their own Cilium BGP), to avoid a competing infra BGP path.
 	// Independent of the tenant Service's externalTrafficPolicy; applies to all LB Services.
 	AllocationOnly *bool `yaml:"allocationOnly,omitempty"`
-
-	// AllocationOnlyLBClass, when non-empty AND AllocationOnly is set, is written as the mirror
-	// Service's spec.loadBalancerClass — but PER-SERVICE: only for LB Services whose tenant Service
-	// designated a valid (parseable) spec.loadBalancerIP. A class that no infra LB provider serves (e.g.
-	// "io.kubevirt/allocation-only") makes Cilium/MetalLB/Kube-VIP ignore that mirror entirely: the
-	// infra CNI programs NO local datapath for the IP (so infra-cluster pods route it out to the
-	// fabric and reach the tenant's own BGP-advertised edge, instead of self-hijacking it) and
-	// reserves NO address for it. For such a Service the tenant owns allocation + BGP advertisement,
-	// and the CCM reports its spec.loadBalancerIP as the LB status without waiting for infra
-	// allocation. LB Services WITHOUT a tenant spec.loadBalancerIP (e.g. internal mesh Services that
-	// take an infra-pool address) keep the legacy allocation-only path untouched — so this can be
-	// enabled fleet-wide without disturbing infra-allocated LoadBalancers. Empty (default) keeps
-	// legacy allocation-only for every Service (infra allocates + reserves the IP but withdraws the
-	// route via etp=Local + no EndpointSlices). Provider-agnostic.
-	//
-	// The discriminator is purely "did the tenant designate a spec.loadBalancerIP" — so an internal
-	// LB Service that sets a static spec.loadBalancerIP also receives the class (its infra datapath
-	// is suppressed, and it is expected to be advertised by the tenant's own BGP), by the same
-	// tenant-owns-the-designated-IP contract as an edge Service. Services that leave loadBalancerIP
-	// unset (infra auto-assigns from a pool) always stay on the legacy path.
-	AllocationOnlyLBClass *string `yaml:"allocationOnlyLBClass,omitempty"`
 }
 
 type InstancesV2Config struct {
