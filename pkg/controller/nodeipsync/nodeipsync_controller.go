@@ -32,6 +32,7 @@ import (
 	"k8s.io/client-go/dynamic/dynamicinformer"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/cache"
+	clientretry "k8s.io/client-go/util/retry"
 	"k8s.io/client-go/util/workqueue"
 	"k8s.io/klog/v2"
 	kubevirtv1 "kubevirt.io/api/core/v1"
@@ -129,12 +130,18 @@ func (c *Controller) processNext() bool {
 
 // sync derives the node InternalIP from the VMI's "default" interface and patches the tenant Node if it drifted.
 func (c *Controller) sync(ctx context.Context, vmiName string) error {
-	u, err := c.infraDynamic.Resource(vmiGVR).Namespace(c.infraNamespace).Get(ctx, vmiName, metav1.GetOptions{})
-	if apierrors.IsNotFound(err) {
-		return nil // VMI gone (drain/replace) — nothing to sync
-	}
+	// Read the VMI from the informer CACHE (not a live GET) — the event that enqueued this key was delivered
+	// from that cache, so it is the right source and avoids an API round-trip per event.
+	obj, exists, err := c.vmiInformer.GetIndexer().GetByKey(c.infraNamespace + "/" + vmiName)
 	if err != nil {
 		return err
+	}
+	if !exists {
+		return nil // VMI gone (drain/replace) — nothing to sync
+	}
+	u, ok := obj.(*unstructured.Unstructured)
+	if !ok {
+		return fmt.Errorf("unexpected cache object type %T for VMI %q", obj, vmiName)
 	}
 	var vmi kubevirtv1.VirtualMachineInstance
 	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(u.Object, &vmi); err != nil {
@@ -145,34 +152,36 @@ func (c *Controller) sync(ctx context.Context, vmiName string) error {
 		return nil
 	}
 
-	// The tenant node name == VMI name for operator/pipeline workers. If no such node exists (hostname
-	// override, or node not yet joined), skip — the periodic cloud-node-controller loop still covers it.
-	node, err := c.tenantClient.CoreV1().Nodes().Get(ctx, vmiName, metav1.GetOptions{})
-	if apierrors.IsNotFound(err) {
+	// Patch under RetryOnConflict — the periodic cloud-node-controller loop writes the same node.status.
+	// addresses, so a concurrent write can conflict; re-read + recompute on conflict (both paths converge).
+	return clientretry.RetryOnConflict(clientretry.DefaultRetry, func() error {
+		// The tenant node name == VMI name for operator/pipeline workers. If no such node exists (hostname
+		// override, or node not yet joined), skip — the periodic cloud-node-controller loop still covers it.
+		node, err := c.tenantClient.CoreV1().Nodes().Get(ctx, vmiName, metav1.GetOptions{})
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		// Desired InternalIP(s) from the VMI "default" interface (same derivation the cloud-node-controller
+		// uses), with the node's current addresses as the fallback source.
+		desired := provider.NodeAddressesFromVMIInterfaces(vmi.Status.Interfaces, node.Status.Addresses)
+		if len(internalIPs(desired)) == 0 {
+			return nil // nothing to set (don't wipe an address to empty)
+		}
+		merged := mergeInternalIPs(node.Status.Addresses, desired)
+		if reflect.DeepEqual(node.Status.Addresses, merged) {
+			return nil // already correct — idempotent no-op
+		}
+		updated := node.DeepCopy()
+		updated.Status.Addresses = merged
+		if _, err := c.tenantClient.CoreV1().Nodes().UpdateStatus(ctx, updated, metav1.UpdateOptions{}); err != nil {
+			return err
+		}
+		klog.Infof("%s: fast-synced node %q InternalIP to %v (VMI launcher-pod IP changed)", ControllerName, vmiName, internalIPs(desired))
 		return nil
-	}
-	if err != nil {
-		return err
-	}
-
-	// Desired InternalIP(s) from the VMI "default" interface (same derivation the cloud-node-controller uses),
-	// with the node's current addresses as the fallback source.
-	desired := provider.NodeAddressesFromVMIInterfaces(vmi.Status.Interfaces, node.Status.Addresses)
-	if len(internalIPs(desired)) == 0 {
-		return nil // nothing to set (don't wipe an address to empty)
-	}
-	merged := mergeInternalIPs(node.Status.Addresses, desired)
-	if reflect.DeepEqual(node.Status.Addresses, merged) {
-		return nil // already correct — idempotent no-op
-	}
-
-	updated := node.DeepCopy()
-	updated.Status.Addresses = merged
-	if _, err := c.tenantClient.CoreV1().Nodes().UpdateStatus(ctx, updated, metav1.UpdateOptions{}); err != nil {
-		return fmt.Errorf("patch node %q addresses: %w", vmiName, err)
-	}
-	klog.Infof("%s: fast-synced node %q InternalIP to %v (VMI launcher-pod IP changed)", ControllerName, vmiName, internalIPs(desired))
-	return nil
+	})
 }
 
 // internalIPs returns just the InternalIP address strings from a NodeAddress slice.

@@ -53,11 +53,12 @@ func newTestController(t *testing.T, ns string, objs []runtime.Object, vmis ...*
 		dynObjs = append(dynObjs, v)
 	}
 	dyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(scheme, listKinds, dynObjs...)
-	return &Controller{
-		tenantClient:   k8sfake.NewSimpleClientset(objs...),
-		infraDynamic:   dyn,
-		infraNamespace: ns,
+	c := NewNodeIPSyncController(k8sfake.NewSimpleClientset(objs...), dyn, ns)
+	// Populate the informer cache directly — sync() reads VMIs from the informer indexer, not a live GET.
+	for _, v := range vmis {
+		_ = c.vmiInformer.GetIndexer().Add(v)
 	}
+	return c
 }
 
 // TestSync_UpdatesNodeIPOnChange: the node's stale InternalIP is replaced with the VMI's current default-
