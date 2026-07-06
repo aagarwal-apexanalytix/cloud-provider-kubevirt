@@ -24,6 +24,7 @@ import (
 	"os"
 
 	"kubevirt.io/cloud-provider-kubevirt/pkg/controller/kubevirteps"
+	"kubevirt.io/cloud-provider-kubevirt/pkg/controller/nodeipsync"
 	"kubevirt.io/cloud-provider-kubevirt/pkg/controller/nodetopology"
 
 	"k8s.io/apimachinery/pkg/util/wait"
@@ -57,6 +58,13 @@ func main() {
 	// add node-topology-controller to the list of controllers
 	controllerInitializers[nodetopology.ControllerName.String()] = app.ControllerInitFuncConstructor{
 		Constructor: StartNodeTopologyControllerWrapper,
+	}
+
+	// add node-ip-sync-controller: event-driven fast-sync of a tenant node's InternalIP when its backing
+	// VMI's launcher-pod IP changes (live migration / restart / stop-start), instead of waiting for the
+	// cloud-node-controller's periodic --node-status-update-frequency.
+	controllerInitializers[nodeipsync.ControllerName] = app.ControllerInitFuncConstructor{
+		Constructor: StartNodeIPSyncControllerWrapper,
 	}
 
 	command := app.NewCloudControllerManagerCommand(ccmOptions, cloudInitializer, controllerInitializers, map[string]string{}, fss, wait.NeverStop)
