@@ -53,9 +53,9 @@ type Controller struct {
 	tenantFactory    informers.SharedInformerFactory
 	tenantEPSTracker tenantEPSTracker
 
-	infraClient        kubernetes.Interface
-	infraDynamic       dynamic.Interface
-	infraFactory       informers.SharedInformerFactory
+	infraClient         kubernetes.Interface
+	infraDynamic        dynamic.Interface
+	infraFactory        informers.SharedInformerFactory
 	infraDynamicFactory dynamicinformer.DynamicSharedInformerFactory
 
 	infraNamespace string
@@ -1039,17 +1039,8 @@ func (c *Controller) getDesiredEndpoints(service *v1.Service, tenantSlices []*di
 			serving := vmi.Status.Phase == kubevirtv1.Running && !isMigrating && tenantReady
 			terminating := vmi.Status.Phase == kubevirtv1.Failed || vmi.Status.Phase == kubevirtv1.Succeeded
 
-			// choose "pod" if present, else "default"
-			var chosen *kubevirtv1.VirtualMachineInstanceNetworkInterface
-			for idx := range vmi.Status.Interfaces {
-				if vmi.Status.Interfaces[idx].Name == "pod" {
-					chosen = &vmi.Status.Interfaces[idx]
-					break
-				}
-				if vmi.Status.Interfaces[idx].Name == "default" && chosen == nil {
-					chosen = &vmi.Status.Interfaces[idx]
-				}
-			}
+			// Prefer the "pod" (masquerade) interface for the infra endpoint IP, else "default".
+			chosen := chooseVMIInterface(vmi.Status.Interfaces)
 			if chosen == nil {
 				klog.V(4).Infof("VMI %s has no suitable network interface", vmi.Name)
 				continue
