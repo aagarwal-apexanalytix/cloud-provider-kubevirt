@@ -9,7 +9,26 @@ import (
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/klog/v2"
 	utilnet "k8s.io/utils/net"
+	kubevirtv1 "kubevirt.io/api/core/v1"
 )
+
+// chooseVMIInterface selects the VMI status interface whose IP is used as the infra endpoint address:
+// PREFER the "pod" (masquerade) interface — its IP is the launcher-pod IP reachable inside the infra
+// cluster — and fall back to "default" when there is no "pod" interface (e.g. a pod-only worker whose sole
+// masquerade NIC is named "default"). Returns nil when neither is present. This was previously injected by a
+// build-time `sed` in the iac image pipeline; it now lives in the fork as tested code (the sed is removed).
+func chooseVMIInterface(ifs []kubevirtv1.VirtualMachineInstanceNetworkInterface) *kubevirtv1.VirtualMachineInstanceNetworkInterface {
+	var chosen *kubevirtv1.VirtualMachineInstanceNetworkInterface
+	for idx := range ifs {
+		if ifs[idx].Name == "pod" {
+			return &ifs[idx] // pod wins outright, regardless of ordering
+		}
+		if ifs[idx].Name == "default" && chosen == nil {
+			chosen = &ifs[idx]
+		}
+	}
+	return chosen
+}
 
 // source: https://github.com/kubernetes/endpointslice/blob/master/utils.go#L280
 func getAddressTypesForService(service *v1.Service) sets.Set[discovery.AddressType] {
