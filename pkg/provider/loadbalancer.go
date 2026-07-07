@@ -271,9 +271,11 @@ func (lb *loadbalancer) createLoadBalancerService(ctx context.Context, lbName st
 	if service.Spec.LoadBalancerIP != "" {
 		lbService.Spec.LoadBalancerIP = service.Spec.LoadBalancerIP
 	}
-	if service.Spec.HealthCheckNodePort > 0 {
-		lbService.Spec.HealthCheckNodePort = service.Spec.HealthCheckNodePort
-	}
+	// Do NOT copy the tenant's HealthCheckNodePort onto the infra Service: tenant nodePort spaces are
+	// independent per cluster, so pinning the tenant's value on the SHARED infra cluster collides with
+	// other tenants' allocations ("failed to allocate requested HealthCheck NodePort NNNNN: provided
+	// port is already allocated") and the LB stays pending forever. Leave it 0 — the infra apiserver
+	// allocates a free port; nothing consumes the infra-side health check port cross-cluster.
 
 	if err := lb.client.Create(ctx, lbService); err != nil {
 		klog.Errorf("Failed to create LB %s: %v", lbName, err)
